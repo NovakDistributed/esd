@@ -17,21 +17,24 @@ class Agent:
     Represents an agent. Tracks all the agent's balances.
     """
     
-    def __init__(self):
+    def __init__(self, **kwargs):
         # ESD balance
         self.esd = 0.0
         # USDC balance
-        self.usdc = 10000.0
+        self.usdc = kwargs.get("starting_usdc", 0.0)
         # ESDS (Dao share) balance
         self.esds = 0.0
         # Eth balance
-        self.eth = 10.0
+        self.eth = kwargs.get("starting_eth", 0.0)
         # Uniswap LP share balance
         self.lp = 0.0
         # Coupon underlying part by expiration epoch
         self.underlying_coupons = collections.defaultdict(float)
         # Coupon premium part by expiration epoch
         self.premium_coupons = collections.defaultdict(float)
+        
+        # What's our max faith in the system in USDC?
+        self.max_faith = kwargs.get("max_faith", 0.0)
         
     def __str__(self):
         """
@@ -81,8 +84,9 @@ class Agent:
         
         # TODO: different faith for different people
         
-        # This should oscilate between 500k and 1m every 5000 blocks
-        faith = 750000.0 + 250000.0 * math.sin(block * (2 * math.pi / 5000))
+        center_faith = self.max_faith * 0.75
+        swing_faith = self.max_faith * 0.25
+        faith = center_faith + swing_faith * math.sin(block * (2 * math.pi / 5000))
         
         return faith
 
@@ -91,7 +95,7 @@ class UniswapPool:
     Represents the Uniswap pool. Tracks ESD and USDC balances of pool, and total outstanding LP shares.
     """
     
-    def __init__(self):
+    def __init__(self, **kwargs):
         # ESD balance
         self.esd = 0.0
         # USDC balance
@@ -192,7 +196,11 @@ class DAO:
     Represents the ESD DAO. Tracks ESD balance of DAO and total outstanding ESDS.
     """
     
-    def __init__(self):
+    def __init__(self, **kwargs):
+        """
+        Take keyword arguments to nspecify experimental parameters.
+        """
+        
         # How many ESD are bonded
         self.esd = 0.0
         # How many ESD exist?
@@ -214,6 +222,9 @@ class DAO:
         self.underlying_coupon_supply = collections.defaultdict(float)
         # Coupon premium parts by expiration epoch
         self.premium_coupon_supply = collections.defaultdict(float)
+        
+        # Should all coupon parts expire?
+        self.param_expire_all = kwargs.get("expire_all", False)
         
     def bond(self, esd):
         """
@@ -326,7 +337,12 @@ class DAO:
         if self.epoch <= redeem_by and self.expanding:
             esd = underlying_coupons + premium_coupons
         else:
-            esd = underlying_coupons
+            if self.param_expire_all:
+                # Destroy underlying ESD
+                esd = 0
+            else:
+                # Return underlying ESD
+                esd = underlying_coupons
             
         self.esd_supply += esd
             
@@ -412,12 +428,15 @@ class Model:
     Full model of the economy.
     """
     
-    def __init__(self):
-        self.uniswap = UniswapPool()
-        self.dao = DAO()
+    def __init__(self, **kwargs):
+        """
+        Takes in experiment parameters and forwards them on to all components.
+        """
+        self.uniswap = UniswapPool(**kwargs)
+        self.dao = DAO(**kwargs)
         self.agents = []
         for i in range(20):
-            agent = Agent()
+            agent = Agent(**kwargs)
             self.agents.append(agent)
         
         # Track time in blocks
@@ -602,7 +621,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     
     # Make a model of the economy
-    model = Model()
+    model = Model(starting_eth=10.0, starting_usdc=1E4, max_faith=1E9, expire_all=True)
     
     # Make a log file for system parameters, for analysis
     stream = open("log.tsv", "w")
