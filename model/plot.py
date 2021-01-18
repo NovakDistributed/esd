@@ -41,7 +41,7 @@ def main():
     if x_column_number == -1:
         raise RuntimeError("No column: " + x_heading)
         
-    fig, axes = plt.subplots(len(columns) - 1, 1)
+    fig, axes = plt.subplots(len(columns) - 1, 1, sharex=True)
     fig.suptitle('ESD Simulation Results')
 
     axis_cursor = 0

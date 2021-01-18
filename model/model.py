@@ -8,6 +8,10 @@ import collections
 import random
 import math
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 class Agent:
     """
     Represents an agent. Tracks all the agent's balances.
@@ -17,11 +21,11 @@ class Agent:
         # ESD balance
         self.esd = 0.0
         # USDC balance
-        self.usdc = 0.0
+        self.usdc = 10000.0
         # ESDS (Dao share) balance
         self.esds = 0.0
         # Eth balance
-        self.eth = 0.0
+        self.eth = 10.0
         # Uniswap LP share balance
         self.lp = 0.0
         # Coupon underlying part by expiration epoch
@@ -77,8 +81,8 @@ class Agent:
         
         # TODO: different faith for different people
         
-        # This should oscilate between 500k and 1m every 500 blocks
-        faith = 750000.0 + 250000.0 * math.sin(block * (2 * math.pi / 500))
+        # This should oscilate between 500k and 1m every 5000 blocks
+        faith = 750000.0 + 250000.0 * math.sin(block * (2 * math.pi / 5000))
         
         return faith
 
@@ -414,21 +418,24 @@ class Model:
         self.agents = []
         for i in range(20):
             agent = Agent()
-            # Give everyone some ETH and USDC to start
-            agent.eth = 1.0
-            agent.usdc = 1000
             self.agents.append(agent)
         
         # Track time in blocks
         self.block = 0
         
-    def log(self, stream):
+    def log(self, stream, header=False):
         """
-        Log block, epoch, price, supply, and faith to the given stream as a TSV line.
+        Log model statistics a TSV line.
+        If header is True, include a header.
         """
         
-        stream.write('{}\t{}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(
+        if header:
+            stream.write("#block\tepoch\tprice\tsupply\tdebt\tcoupons\tfaith\n")
+        
+        stream.write('{}\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(
             self.block, self.dao.epoch, self.uniswap.esd_price(), self.dao.esd_supply,
+            self.dao.debt,
+            sum(self.dao.underlying_coupon_supply.values()) + sum(self.dao.premium_coupon_supply.values()),
             self.get_overall_faith()))
        
     def get_overall_faith(self):
@@ -447,7 +454,7 @@ class Model:
         
         self.block += 1
         
-        print("Block {}, epoch {}, price {:.2f}, supply {:.2f}, faith: {:.2f}, bonded {:.2f}, liquidity {:.2f} ESD / {:.2f} USDC".format(
+        logger.info("Block {}, epoch {}, price {:.2f}, supply {:.2f}, faith: {:.2f}, bonded {:.2f}, liquidity {:.2f} ESD / {:.2f} USDC".format(
             self.block, self.dao.epoch, self.uniswap.esd_price(), self.dao.esd_supply,
             self.get_overall_faith(), self.dao.esd, self.uniswap.esd, self.uniswap.usdc))
         
@@ -495,45 +502,45 @@ class Model:
                 # action will the agent do?
                 commitment = random.random() * 0.1
                 
-                print("Agent {}: {}".format(agent_num, action))
+                logger.debug("Agent {}: {}".format(agent_num, action))
                 
                 if action == "buy":
                     usdc = portion_dedusted(a.usdc, commitment)
                     esd = self.uniswap.buy(usdc)
                     a.usdc -= usdc
                     a.esd += esd
-                    print("Buy {:.2f} ESD for {:.2f} USDC".format(esd, usdc))
+                    logger.debug("Buy {:.2f} ESD for {:.2f} USDC".format(esd, usdc))
                 elif action == "sell":
                     esd = portion_dedusted(a.esd, commitment)
                     usdc = self.uniswap.sell(esd)
                     a.esd -= esd
                     a.usdc += usdc
-                    print("Sell {:.2f} ESD for {:.2f} USDC".format(esd, usdc))
+                    logger.debug("Sell {:.2f} ESD for {:.2f} USDC".format(esd, usdc))
                 elif action == "advance":
                     fee = self.dao.fee()
                     esd = self.dao.advance(self.block, fee, self.uniswap)
                     a.eth -= fee
                     a.esd += esd
-                    print("Advance for {:.2f} ESD".format(esd))
+                    logger.debug("Advance for {:.2f} ESD".format(esd))
                 elif action == "bond":
                     esd = portion_dedusted(a.esd, commitment)
                     esds = self.dao.bond(esd)
                     a.esd -= esd
                     a.esds += esds
-                    print("Bond {:.2f} ESD".format(esd))
+                    logger.debug("Bond {:.2f} ESD".format(esd))
                 elif action == "unbond":
                     esds = portion_dedusted(a.esds, commitment)
                     esd = self.dao.unbond(esds)
                     a.esds -= esds
                     a.esd += esd
-                    print("Unbond {:.2f} ESD".format(esd))
+                    logger.debug("Unbond {:.2f} ESD".format(esd))
                 elif action == "coupon":
                     esd = self.dao.couponable(portion_dedusted(a.esd, commitment))
                     (redeem_by, underlying_coupons, premium_coupons) = self.dao.coupon(esd)
                     a.esd = max(0, a.esd - esd)
                     a.underlying_coupons[redeem_by] += underlying_coupons
                     a.premium_coupons[redeem_by] += premium_coupons
-                    print("Burn {:.2f} ESD for {:.2f} coupons".format(esd, underlying_coupons + premium_coupons))
+                    logger.debug("Burn {:.2f} ESD for {:.2f} coupons".format(esd, underlying_coupons + premium_coupons))
                 elif action == "redeem":
                     total_redeemed = 0
                     total_esd = 0
@@ -555,7 +562,7 @@ class Model:
                     drop_zeroes(a.underlying_coupons)
                     drop_zeroes(a.premium_coupons)
                         
-                    print("Redeem {:.2f} coupons for {:.2f} ESD".format(total_redeemed, total_esd))
+                    logger.debug("Redeem {:.2f} coupons for {:.2f} ESD".format(total_redeemed, total_esd))
                 elif action == "deposit":
                     price = self.uniswap.esd_price()
                     
@@ -569,20 +576,21 @@ class Model:
                     a.esd = max(0, a.esd - esd)
                     a.usdc = max(0, a.usdc - usdc)
                     a.lp += lp
-                    print("Provide {:.2f} ESD and {:.2f} USDC".format(esd, usdc))
+                    logger.debug("Provide {:.2f} ESD and {:.2f} USDC".format(esd, usdc))
                 elif action == "withdraw":
                     lp = portion_dedusted(a.lp, commitment)
                     (esd, usdc) = self.uniswap.withdraw(lp)
                     a.lp -= lp
                     a.esd += esd
                     a.usdc += usdc
-                    print("Stop providing {:.2f} ESD and {:.2f} USDC".format(esd, usdc))
+                    logger.debug("Stop providing {:.2f} ESD and {:.2f} USDC".format(esd, usdc))
                 else:
                     raise RuntimeError("Bad action: " + action)
                     
                 anyone_acted = True
             else:
-                print("Agent {} cannot act!".format(agent_num))
+                # It's normal for agents other then the first to advance to not be able to act on block 0.
+                pass
         return anyone_acted
         
 
@@ -591,21 +599,22 @@ def main():
     Main function: run the simulation.
     """
     
+    logging.basicConfig(level=logging.INFO)
+    
     # Make a model of the economy
     model = Model()
     
     # Make a log file for system parameters, for analysis
     stream = open("log.tsv", "w")
-    stream.write("#block\tepoch\tprice\tsupply\tfaith\n")
     
-    for i in range(10000):
+    for i in range(50000):
         # Every block
         # Try and tick the model
         if not model.step():
             # Nobody could act
             break
         # Log system state
-        model.log(stream)
+        model.log(stream, header=(i == 0))
     
 if __name__ == "__main__":
     main()
