@@ -54,6 +54,8 @@ class Agent:
         # TODO: real (learned? adversarial? GA?) model of the agents
         # TODO: agent preferences/utility function
         
+        strategy["coupon"] = 0.05
+        
         if price > 1.0:
             # Expansion so we want to bond
             strategy["bond"] = 2.0
@@ -216,15 +218,40 @@ class DAO:
         
         # TODO: add real interest/debt/coupon model
         self.interest = 0.01
+        # How many ESD can be issued in coupons?
         self.debt = 0.0
+        # How many ESD can be redeemed from coupons?
+        self.total_redeemable = 0.0
+        
+        # How many epochs do coupons take to expire?
+        self.expiry_delay = 90
         
         # Coupon underlying parts by issue epoch
         self.underlying_coupon_supply = collections.defaultdict(float)
         # Coupon premium parts by issue epoch
         self.premium_coupon_supply = collections.defaultdict(float)
         
+        # How many coupons expired?
+        self.expired_coupons = 0.0
+        
         # Should all coupon parts expire?
         self.param_expire_all = kwargs.get("expire_all", False)
+        
+    def total_coupons(self):
+        """
+        Get all outstanding unexpired coupons.
+        """
+        
+        total = 0.0
+        for epoch, amount in self.underlying_coupon_supply.items():
+            if epoch + self.expiry_delay >= self.epoch or not self.param_expire_all:
+                # Underlying isn't expired
+                total += amount
+        for epoch, amount in self.premium_coupon_supply.items():
+            if epoch + self.expiry_delay >= self.epoch:
+                # Premium isn't expired
+                total += amount
+        return total
         
     def bond(self, esd):
         """
@@ -303,10 +330,51 @@ class DAO:
         
         return (issued_at, underlying_coupons, premium_coupons)
         
+    def filter_expired(self, underlying, premium):
+        """
+        Given a dict of underlying coupon balances by creation epoch, and
+        premium coupon balances by epoch, drop all the coupons that are
+        expired.
+        
+        Return the total value expired.
+        """
+        
+        total = 0
+        
+        expired = set()
+        unexpired = set()
+        for epoch in premium.keys():
+            if epoch + self.expiry_delay < self.epoch:
+                expired.add(epoch)
+        for to_drop in expired:
+            total += premium[to_drop]
+            del premium[to_drop]
+            
+        if self.param_expire_all:
+            # Also do the underlying
+            for epoch in underlying.keys():
+                if epoch + self.expiry_delay < self.epoch:
+                    expired.add(epoch)
+            for to_drop in expired:
+                total += underlying[to_drop]
+                del underlying[to_drop]
+                
+        return total
+        
+    def expire_coupons(self):
+        """
+        Expire all expired coupons in the total supplies.
+        """
+        
+        self.expired_coupons += self.filter_expired(self.underlying_coupon_supply,
+                                                    self.premium_coupon_supply)
+        
     def redeemable(self, issued_at, underlying_coupons, premium_coupons):
         """
         Return the maximum (underlying, premium) coupons currently redeemable
         from those issued at the given epoch, up to the given limits.
+        
+        Redeemable coupons may actually be expired, in which case they redeem to 0.
         
         Premium coupons will always be redeemed even if expired; they just
         redeem for no money.
@@ -314,19 +382,27 @@ class DAO:
         
         # TODO: real redemption cap logic
         
-        if self.expanding:
-            return (underlying_coupons, premium_coupons)
-        else:
+        if self.expanding and issued_at + 2 >= self.epoch:
+            # Coupons are only redeemable at all 2 epochs after issuance, and during expansions
+            if underlying_coupons >= self.total_redeemable:
+                return (self.total_redeemable, 0)
+            elif underlying_coupons + premium_coupons >= self.total_redeemable:
+                return (underlying_coupons, self.total_redeemable - underlying_coupons)
+            else:
+                return (underlying_coupons, premium_coupons)
+        else:   
             # Don't let people redeem anything when not expanding, even the
             # underlying.
             return (0.0, 0.0)
     
     def redeem(self, issued_at, underlying_coupons, premium_coupons):
         """
-        Redeem the given number of coupons.
+        Redeem the given number of coupons. Expired coupons redeem to 0.
         
         Pays out the underlying and premium in an expansion phase, or only the
         underlying otherwise, or if the coupons are expired.
+        
+        Assumes everything is actually redeemable.
         """
         
         # TODO: real redeem logic
@@ -334,9 +410,11 @@ class DAO:
         self.underlying_coupon_supply[issued_at] = max(0, self.underlying_coupon_supply[issued_at] - underlying_coupons)
         self.premium_coupon_supply[issued_at] = max(0, self.premium_coupon_supply[issued_at] - premium_coupons)
         
-        if self.epoch <= issued_at + 90 and self.expanding:
+        if self.epoch <= issued_at + self.expiry_delay:
+            # Not expired
             esd = underlying_coupons + premium_coupons
         else:
+            # Expired
             if self.param_expire_all:
                 # Destroy underlying ESD
                 esd = 0
@@ -345,8 +423,14 @@ class DAO:
                 esd = underlying_coupons
             
         self.esd_supply += esd
+        self.total_redeemable -= esd
             
         return esd
+        
+    def expire(self, issued_at, underlying_coupons, premium_coupons):
+        """
+        Handle expiration of coupons.
+        """
         
     def fee(self):
         """
@@ -385,9 +469,22 @@ class DAO:
             self.expanding = False
             
         if self.expanding:
+            # How much total new ESD can we make?
             new_esd = self.interest * self.esd
+            
+            total_coupons = self.total_coupons()
+            if self.total_redeemable < total_coupons:
+                # Fill the redeemable bucket first
+                new_redeemable = total_coupons - self.total_redeemable
+                new_redeemable = min(new_redeemable, new_esd)
+                self.total_redeemable += new_redeemable 
+                new_esd -= new_redeemable
+                
+            # Then make the rest rewards
             self.esd += new_esd
             self.esd_supply += new_esd
+            
+            # And clear the debt
             self.debt = 0
         else:
             # TODO: real debt model, debt cap
@@ -449,12 +546,11 @@ class Model:
         """
         
         if header:
-            stream.write("#block\tepoch\tprice\tsupply\tdebt\tcoupons\tfaith\n")
+            stream.write("#block\tprice\tsupply\tdebt\tcoupons\texpired\tfaith\n")
         
-        stream.write('{}\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(
-            self.block, self.dao.epoch, self.uniswap.esd_price(), self.dao.esd_supply,
-            self.dao.debt,
-            sum(self.dao.underlying_coupon_supply.values()) + sum(self.dao.premium_coupon_supply.values()),
+        stream.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(
+            self.block, self.uniswap.esd_price(), self.dao.esd_supply,
+            self.dao.debt, self.dao.total_coupons(), self.dao.expired_coupons,
             self.get_overall_faith()))
        
     def get_overall_faith(self):
@@ -473,13 +569,20 @@ class Model:
         
         self.block += 1
         
-        logger.info("Block {}, epoch {}, price {:.2f}, supply {:.2f}, faith: {:.2f}, bonded {:.2f}, liquidity {:.2f} ESD / {:.2f} USDC".format(
+        # Clean up coupon expiry on the DAO side
+        self.dao.expire_coupons()
+        
+        logger.info("Block {}, epoch {}, price {:.2f}, supply {:.2f}, faith: {:.2f}, bonded {:.2f}, coupons: {:.2f}, liquidity {:.2f} ESD / {:.2f} USDC".format(
             self.block, self.dao.epoch, self.uniswap.esd_price(), self.dao.esd_supply,
-            self.get_overall_faith(), self.dao.esd, self.uniswap.esd, self.uniswap.usdc))
+            self.get_overall_faith(), self.dao.esd, self.dao.total_coupons(),
+            self.uniswap.esd, self.uniswap.usdc))
         
         anyone_acted = False
         for agent_num, a in enumerate(self.agents):
             # TODO: real strategy
+            
+            # Clean up expired coupon records on the agent side
+            self.dao.filter_expired(a.underlying_coupons, a.premium_coupons)
             
             options = []
             if a.usdc > 0 and self.uniswap.operational():
@@ -581,7 +684,7 @@ class Model:
                     drop_zeroes(a.underlying_coupons)
                     drop_zeroes(a.premium_coupons)
                         
-                    logger.debug("Redeem {:.2f} coupons for {:.2f} ESD".format(total_redeemed, total_esd))
+                    logger.info("Redeem {:.2f} coupons for {:.2f} ESD".format(total_redeemed, total_esd))
                 elif action == "deposit":
                     price = self.uniswap.esd_price()
                     
@@ -621,7 +724,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     
     # Make a model of the economy
-    model = Model(starting_eth=10.0, starting_usdc=1E4, max_faith=1E9, expire_all=True)
+    model = Model(starting_eth=10.0, starting_usdc=1E4, max_faith=1E6, expire_all=True)
     
     # Make a log file for system parameters, for analysis
     stream = open("log.tsv", "w")
@@ -634,6 +737,6 @@ def main():
             break
         # Log system state
         model.log(stream, header=(i == 0))
-    
+        
 if __name__ == "__main__":
     main()
