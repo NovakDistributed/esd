@@ -35,6 +35,13 @@ class Agent:
         
         # What's our max faith in the system in USDC?
         self.max_faith = kwargs.get("max_faith", 0.0)
+        # And our min faith
+        self.min_faith = kwargs.get("min_faith", 0.0)
+        # Should we even use faith?
+        self.use_faith = kwargs.get("use_faith", True)
+        
+        # What ESD is coming to us in future epochs?
+        self.future_esd = collections.defaultdict(float)
         
     def __str__(self):
         """
@@ -54,20 +61,33 @@ class Agent:
         # TODO: real (learned? adversarial? GA?) model of the agents
         # TODO: agent preferences/utility function
         
-        strategy["coupon"] = 0.05
+        # People are slow to coupon
+        strategy["coupon"] = 0.1
+        # And to unbond because of the delay
+        strategy["unbond"] = 0.1
         
         if price > 1.0:
             # Expansion so we want to bond
             strategy["bond"] = 2.0
+            # And not unbond
+            strategy["unbond"] = 0.5
             # Or redeem if possible
             strategy["redeem"] = 100
-            
-        if price * total_supply > self.get_faith(block, price, total_supply):
-            # There is too much ESD, so we want to sell
-            strategy["sell"] = 4.0
         else:
-            # We prefer to buy
-            strategy["buy"] = 4.0
+            # We probably want to unbond due to no returns
+            strategy["unbond"] = 2.0
+            # And not bond
+            strategy["bond"] = 0.5
+       
+        if self.use_faith:
+            # Vary our strategy based on how much ESD we think ought to exist
+            if price * total_supply > self.get_faith(block, price, total_supply):
+                # There is too much ESD, so we want to sell
+                strategy["unbond"] *= 2
+                strategy["sell"] = 4.0
+            else:
+                # We prefer to buy
+                strategy["buy"] = 4.0
         
         return strategy
         
@@ -86,8 +106,8 @@ class Agent:
         
         # TODO: different faith for different people
         
-        center_faith = self.max_faith * 0.75
-        swing_faith = self.max_faith * 0.25
+        center_faith = (self.max_faith + self.min_faith) / 2
+        swing_faith = (self.max_faith - self.min_faith) / 2
         faith = center_faith + swing_faith * math.sin(block * (2 * math.pi / 5000))
         
         return faith
@@ -147,6 +167,10 @@ class UniswapPool:
         Withdraw the given number of shares. Gets a balanced amount of ESD and USDC.
         Returns a tuple of (ESD, USDC)
         """
+        
+        if self.total_shares == 0:
+            return 0, 0
+        
         # TODO: get the real uniswap withdraw logic
         portion = shares / self.total_shares
         
@@ -215,9 +239,11 @@ class DAO:
         self.epoch_block = 0
         # Are we expanding or contracting
         self.expanding = False
+        # And since when?
+        self.phase_since = -1
         
         # TODO: add real interest/debt/coupon model
-        self.interest = 0.01
+        self.interest = 1E-4
         # How many ESD can be issued in coupons?
         self.debt = 0.0
         # How many ESD can be redeemed from coupons?
@@ -274,10 +300,12 @@ class DAO:
     def unbond(self, shares):
         """
         Unbond and withdraw the given number of shares.
-        Returns the amount of ESD received.
+        Returns the amount of ESD received, and the epoch it will be available.
         """
         
-        # TODO: model lockups
+        
+        if self.total_shares == 0:
+            return 0, self.epoch + 1
         
         portion = shares / self.total_shares
         
@@ -286,7 +314,7 @@ class DAO:
         self.total_shares = max(0, self.total_shares - shares)
         self.esd = max(0, self.esd - esd)
         
-        return esd
+        return esd, self.epoch + 15
         
     def get_coupon_rate(self):
         """
@@ -294,7 +322,7 @@ class DAO:
         premium), if the premium doesn't expire.
         """
         
-        # TODO: reaql logic here
+        # TODO: real logic here
         
         if self.esd_supply > 0:
             return self.debt / self.esd_supply
@@ -464,13 +492,17 @@ class DAO:
         self.epoch += 1
         
         if uniswap.esd_price() >= 1.0:
+            if not self.expanding:
+                self.phase_epoch = self.epoch
             self.expanding = True
         else:
+            if self.expanding:
+                self.phase_epoch = self.epoch
             self.expanding = False
             
         if self.expanding:
             # How much total new ESD can we make?
-            new_esd = self.interest * self.esd
+            new_esd = min(0.03, self.interest * (self.epoch - self.phase_epoch + 1)) * self.esd
             
             total_coupons = self.total_coupons()
             if self.total_redeemable < total_coupons:
@@ -546,10 +578,10 @@ class Model:
         """
         
         if header:
-            stream.write("#block\tprice\tsupply\tdebt\tcoupons\texpired\tfaith\n")
+            stream.write("#block\tprice\tsupply\tbonded\tdebt\tcoupons\texpired\tfaith\n")
         
-        stream.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(
-            self.block, self.uniswap.esd_price(), self.dao.esd_supply,
+        stream.write('{}\t{:.2f}\t{:.2f}\t{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(
+            self.block, self.uniswap.esd_price(), self.dao.esd_supply, self.dao.esd/self.dao.esd_supply,
             self.dao.debt, self.dao.total_coupons(), self.dao.expired_coupons,
             self.get_overall_faith()))
        
@@ -572,9 +604,9 @@ class Model:
         # Clean up coupon expiry on the DAO side
         self.dao.expire_coupons()
         
-        logger.info("Block {}, epoch {}, price {:.2f}, supply {:.2f}, faith: {:.2f}, bonded {:.2f}, coupons: {:.2f}, liquidity {:.2f} ESD / {:.2f} USDC".format(
+        logger.info("Block {}, epoch {}, price {:.2f}, supply {:.2f}, faith: {:.2f}, bonded {:2.1f}%, coupons: {:.2f}, liquidity {:.2f} ESD / {:.2f} USDC".format(
             self.block, self.dao.epoch, self.uniswap.esd_price(), self.dao.esd_supply,
-            self.get_overall_faith(), self.dao.esd, self.dao.total_coupons(),
+            self.get_overall_faith(), self.dao.esd / max(self.dao.esd_supply, 1E-9) * 100, self.dao.total_coupons(),
             self.uniswap.esd, self.uniswap.usdc))
         
         anyone_acted = False
@@ -583,6 +615,10 @@ class Model:
             
             # Clean up expired coupon records on the agent side
             self.dao.filter_expired(a.underlying_coupons, a.premium_coupons)
+            
+            # Process unbonded ESD
+            a.esd += a.future_esd[self.dao.epoch]
+            del a.future_esd[self.dao.epoch]
             
             options = []
             if a.usdc > 0 and self.uniswap.operational():
@@ -628,16 +664,18 @@ class Model:
                 
                 if action == "buy":
                     usdc = portion_dedusted(a.usdc, commitment)
+                    price = self.uniswap.esd_price()
                     esd = self.uniswap.buy(usdc)
                     a.usdc -= usdc
                     a.esd += esd
-                    logger.debug("Buy {:.2f} ESD for {:.2f} USDC".format(esd, usdc))
+                    logger.debug("Buy {:.2f} ESD @ {:.2f} for {:.2f} USDC".format(esd, price, usdc))
                 elif action == "sell":
                     esd = portion_dedusted(a.esd, commitment)
+                    price = self.uniswap.esd_price()
                     usdc = self.uniswap.sell(esd)
                     a.esd -= esd
                     a.usdc += usdc
-                    logger.debug("Sell {:.2f} ESD for {:.2f} USDC".format(esd, usdc))
+                    logger.debug("Sell {:.2f} ESD @ {:.2f} for {:.2f} USDC".format(esd, price, usdc))
                 elif action == "advance":
                     fee = self.dao.fee()
                     esd = self.dao.advance(self.block, fee, self.uniswap)
@@ -652,9 +690,9 @@ class Model:
                     logger.debug("Bond {:.2f} ESD".format(esd))
                 elif action == "unbond":
                     esds = portion_dedusted(a.esds, commitment)
-                    esd = self.dao.unbond(esds)
+                    esd, when = self.dao.unbond(esds)
                     a.esds -= esds
-                    a.esd += esd
+                    a.future_esd[when] += esd
                     logger.debug("Unbond {:.2f} ESD".format(esd))
                 elif action == "coupon":
                     esd = self.dao.couponable(portion_dedusted(a.esd, commitment))
@@ -684,7 +722,7 @@ class Model:
                     drop_zeroes(a.underlying_coupons)
                     drop_zeroes(a.premium_coupons)
                         
-                    logger.info("Redeem {:.2f} coupons for {:.2f} ESD".format(total_redeemed, total_esd))
+                    logger.debug("Redeem {:.2f} coupons for {:.2f} ESD".format(total_redeemed, total_esd))
                 elif action == "deposit":
                     price = self.uniswap.esd_price()
                     
@@ -724,7 +762,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     
     # Make a model of the economy
-    model = Model(starting_eth=10.0, starting_usdc=1E4, max_faith=1E6, expire_all=True)
+    model = Model(starting_eth=10.0, starting_usdc=1E5, per_block_usdc=5, min_faith=0.5E6, max_faith=1E6, use_faith=True, expire_all=True)
     
     # Make a log file for system parameters, for analysis
     stream = open("log.tsv", "w")
