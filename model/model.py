@@ -218,9 +218,9 @@ class DAO:
         self.interest = 0.01
         self.debt = 0.0
         
-        # Coupon underlying parts by expiration epoch
+        # Coupon underlying parts by issue epoch
         self.underlying_coupon_supply = collections.defaultdict(float)
-        # Coupon premium parts by expiration epoch
+        # Coupon premium parts by issue epoch
         self.premium_coupon_supply = collections.defaultdict(float)
         
         # Should all coupon parts expire?
@@ -287,26 +287,26 @@ class DAO:
     def coupon(self, esd):
         """
         Spend the given number of ESD on coupons.
-        Returns (redeem_by, underlying_coupons, premium_coupons)
+        Returns (issued_at, underlying_coupons, premium_coupons)
         """
         
         rate = self.get_coupon_rate()
         
         underlying_coupons = esd
         premium_coupons = esd * rate
-        redeem_by = self.epoch + 90
+        issued_at = self.epoch
         
         self.esd_supply = max(0, self.esd_supply - esd)
         self.debt = max(0, self.debt - esd)
-        self.underlying_coupon_supply[redeem_by] += underlying_coupons
-        self.premium_coupon_supply[redeem_by] += premium_coupons
+        self.underlying_coupon_supply[issued_at] += underlying_coupons
+        self.premium_coupon_supply[issued_at] += premium_coupons
         
-        return (redeem_by, underlying_coupons, premium_coupons)
+        return (issued_at, underlying_coupons, premium_coupons)
         
-    def redeemable(self, redeem_by, underlying_coupons, premium_coupons):
+    def redeemable(self, issued_at, underlying_coupons, premium_coupons):
         """
         Return the maximum (underlying, premium) coupons currently redeemable
-        from those expiring at the given epoch, up to the given limits.
+        from those issued at the given epoch, up to the given limits.
         
         Premium coupons will always be redeemed even if expired; they just
         redeem for no money.
@@ -321,7 +321,7 @@ class DAO:
             # underlying.
             return (0.0, 0.0)
     
-    def redeem(self, redeem_by, underlying_coupons, premium_coupons):
+    def redeem(self, issued_at, underlying_coupons, premium_coupons):
         """
         Redeem the given number of coupons.
         
@@ -331,10 +331,10 @@ class DAO:
         
         # TODO: real redeem logic
         
-        self.underlying_coupon_supply[redeem_by] = max(0, self.underlying_coupon_supply[redeem_by] - underlying_coupons)
-        self.premium_coupon_supply[redeem_by] = max(0, self.premium_coupon_supply[redeem_by] - premium_coupons)
+        self.underlying_coupon_supply[issued_at] = max(0, self.underlying_coupon_supply[issued_at] - underlying_coupons)
+        self.premium_coupon_supply[issued_at] = max(0, self.premium_coupon_supply[issued_at] - premium_coupons)
         
-        if self.epoch <= redeem_by and self.expanding:
+        if self.epoch <= issued_at + 90 and self.expanding:
             esd = underlying_coupons + premium_coupons
         else:
             if self.param_expire_all:
@@ -496,9 +496,9 @@ class Model:
                 options.append("coupon")
             if len(a.underlying_coupons) > 0:
                 # Get the oldest coupons
-                redeem_by, underlying = next(iter(a.underlying_coupons.items()))
-                premium = a.premium_coupons[redeem_by]
-                (redeem_underlying, redeem_premium) = self.dao.redeemable(redeem_by, underlying, premium)
+                issued_at, underlying = next(iter(a.underlying_coupons.items()))
+                premium = a.premium_coupons[issued_at]
+                (redeem_underlying, redeem_premium) = self.dao.redeemable(issued_at, underlying, premium)
                 if redeem_underlying > 0 or redeem_premium > 0:
                     options.append("redeem")
             if a.usdc > 0 and a.esd > 0:
@@ -555,23 +555,23 @@ class Model:
                     logger.debug("Unbond {:.2f} ESD".format(esd))
                 elif action == "coupon":
                     esd = self.dao.couponable(portion_dedusted(a.esd, commitment))
-                    (redeem_by, underlying_coupons, premium_coupons) = self.dao.coupon(esd)
+                    (issued_at, underlying_coupons, premium_coupons) = self.dao.coupon(esd)
                     a.esd = max(0, a.esd - esd)
-                    a.underlying_coupons[redeem_by] += underlying_coupons
-                    a.premium_coupons[redeem_by] += premium_coupons
+                    a.underlying_coupons[issued_at] += underlying_coupons
+                    a.premium_coupons[issued_at] += premium_coupons
                     logger.debug("Burn {:.2f} ESD for {:.2f} coupons".format(esd, underlying_coupons + premium_coupons))
                 elif action == "redeem":
                     total_redeemed = 0
                     total_esd = 0
                     # We just redeem everything we can, in dict order, and ignore commitment
-                    for redeem_by, underlying_coupons in a.underlying_coupons.items():
-                        premium_coupons = a.premium_coupons[redeem_by]
+                    for issued_at, underlying_coupons in a.underlying_coupons.items():
+                        premium_coupons = a.premium_coupons[issued_at]
                         
-                        (underlying_redeemed, premium_redeemed) = self.dao.redeemable(redeem_by, underlying_coupons, premium_coupons)
-                        esd = self.dao.redeem(redeem_by, underlying_redeemed, premium_redeemed)
+                        (underlying_redeemed, premium_redeemed) = self.dao.redeemable(issued_at, underlying_coupons, premium_coupons)
+                        esd = self.dao.redeem(issued_at, underlying_redeemed, premium_redeemed)
                         
-                        a.underlying_coupons[redeem_by] = max(0, a.underlying_coupons[redeem_by] - underlying_redeemed)
-                        a.premium_coupons[redeem_by] = max(0, a.premium_coupons[redeem_by] - premium_redeemed)
+                        a.underlying_coupons[issued_at] = max(0, a.underlying_coupons[issued_at] - underlying_redeemed)
+                        a.premium_coupons[issued_at] = max(0, a.premium_coupons[issued_at] - premium_redeemed)
                             
                         a.esd += esd
                         
