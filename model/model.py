@@ -762,7 +762,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     
     # Make a model of the economy
-    model = Model(starting_eth=10.0, starting_usdc=5E4, min_faith=0.5E6, max_faith=1E6, use_faith=True, expire_all=True)
+    model = Model(starting_eth=10.0, starting_usdc=1E5, min_faith=0.5E6, max_faith=1E6, use_faith=True, expire_all=True)
     
     # Make a log file for system parameters, for analysis
     stream = open("log.tsv", "w")
