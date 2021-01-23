@@ -31,8 +31,16 @@ contract MockOracle is Oracle {
         _index = 0;
         _usdc = usdc;
     }
+    
+    function set(address factory, address usdc) external {
+        _usdc = usdc;
+        _pair = IUniswapV2Pair(IUniswapV2Factory(factory).createPair(_dollar, _usdc));
 
-    function usdc() internal view returns (address) {
+        (address token0, address token1) = (_pair.token0(), _pair.token1());
+        _index = _dollar == token0 ? 0 : 1;
+    }
+
+    function getUsdc() public view returns (address) {
         return _usdc;
     }
 
