@@ -26,7 +26,19 @@ Then, you can deploy into Ganache with Truffle (which you also may need to `npm 
 truffle migrate --network=development
 ```
 
-Then, you can run a model against the chain.
+Then, you can run a model against the chain. For that, you probably want a Python virtual environment:
+
+```
+virtualenv --python python3 venv
+. venv/bin/activate
+```
+
+And you will need to install the dependencies for the Python model:
+
+```
+pip3 install -r requirements.txt
+```
+
 
 TODO: Implement something with pyweb3 that can share agents and action representations with integrated Python version?
 
